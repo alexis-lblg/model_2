@@ -2,16 +2,17 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
-d = 16
-sigma = 0.002
+d = 3
+sigma = 0.004
 lr = 1
-epochs = 5000
+epochs = 40000
 batch_size = 5128
 num_x = 1001
-device = "cpu"
+device = "cuda"
 
 class TinyModel(nn.Module):
     def __init__(self, d, num_classes):
@@ -25,6 +26,7 @@ class TinyModel(nn.Module):
         return logits  
 
 model = TinyModel(d, num_x)
+model = model.to(device)
 
 optimizer = optim.AdamW(model.parameters())
 criterion = nn.CrossEntropyLoss()
@@ -45,144 +47,103 @@ def f(x, sigma):
 def sample_batch(batch_size):
     x = np.random.randint(0, num_x, size=batch_size)  
     y = np.array([f(val, sigma) for val in x])
-    return torch.tensor(x, dtype=torch.long), torch.tensor(y, dtype=torch.long)
+    return torch.tensor(x, dtype=torch.long).to(device), torch.tensor(y, dtype=torch.long).to(device)
 
 #def sample_batch(batch_size):
 #    x = np.arange(0, batch_size)  
 #    indices = np.array([f(val, sigma) for val in x])
 #    return torch.tensor(x, dtype=torch.long), torch.tensor(indices, dtype=torch.long)
 
-def plot_embeddings_2d(model, num_points=1000, figsize=(12, 8)):
-    model.eval()
-    
-    x_values = torch.arange(0, num_points, dtype=torch.long)
-    
-    with torch.no_grad():
-        embeddings = model.embedding(x_values).numpy()  # Shape: (num_points, 2)
-    
-    embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
-    colors = x_values.numpy() 
-    
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
-    
-    scatter = ax1.scatter(embeddings[:, 0], embeddings[:, 1], 
-                         c=colors, cmap='viridis', 
-                         s=50, alpha=0.7, edgecolors='black', linewidth=0.5)
-    
-    cbar = plt.colorbar(scatter, ax=ax1)
-    cbar.set_label('Original x value', fontsize=12)
-    
-    ax1.set_xlabel('Embedding dimension 1', fontsize=12)
-    ax1.set_ylabel('Embedding dimension 2', fontsize=12)
-    ax1.set_title('2D Embeddings Colored by x Value', fontsize=14)
-    ax1.grid(True, alpha=0.3)
-    
-    ax2.plot(embeddings[:, 0], embeddings[:, 1], 'b-', alpha=0.5, linewidth=1)
-    scatter2 = ax2.scatter(embeddings[:, 0], embeddings[:, 1], 
-                          c=colors, cmap='viridis', 
-                          s=50, alpha=0.8, edgecolors='black', linewidth=0.5)
-    
-    cbar2 = plt.colorbar(scatter2, ax=ax2)
-    cbar2.set_label('Original x value', fontsize=12)
-    
-    ax2.set_xlabel('Embedding dimension 1', fontsize=12)
-    ax2.set_ylabel('Embedding dimension 2', fontsize=12)
-    ax2.set_title('Embedding Trajectory (connected in x order)', fontsize=14)
-    ax2.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.show()
-    
-    print(f"Embedding statistics:")
-    print(f"  Range dim 1: [{embeddings[:, 0].min():.4f}, {embeddings[:, 0].max():.4f}]")
-    print(f"  Range dim 2: [{embeddings[:, 1].min():.4f}, {embeddings[:, 1].max():.4f}]")
-    
-    return embeddings
 
-def plot_embeddings_3d(model, num_points=1000, figsize=(14, 6),
-                           view_angle=(30, 45), show_sphere=True):
-    """
-    Visualise les embeddings 3D d'un modèle avec deux graphiques côte à côte :
-    - Scatter simple
-    - Scatter avec trajectoire
-    La profondeur est indiquée par l'ombrage automatique de matplotlib (depthshade).
-    La barre de couleur est placée à droite, bien distincte des graphiques.
-    """
+
+
+def plot_embeddings_3d(model, num_points=1000, show_sphere=True):
     model.eval()
-    x_values = torch.arange(0, num_points, dtype=torch.long)
+    x_values = torch.arange(0, num_points, dtype=torch.long).to(device)
 
     with torch.no_grad():
-        embeddings = model.embedding(x_values).numpy()
-
+        embeddings = model.embedding(x_values).cpu().numpy()
     if embeddings.shape[1] > 3:
         embeddings = embeddings[:, :3]
+    embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+    colors = x_values.cpu().numpy()
 
-    # Normalisation L2 (vecteurs de norme 1)
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    embeddings = embeddings / norms
+    fig = make_subplots(rows=1, cols=2, specs=[[{'type': 'scatter3d'}, {'type': 'scatter3d'}]],
+                        subplot_titles=('Scatter 3D', 'Trajectory 3D'))
 
-    # Couleurs basées sur la valeur de x
-    colors = x_values.numpy()
+    for col in [1, 2]:
+        if show_sphere:
+            u = np.linspace(0, 2 * np.pi, 30)
+            v = np.linspace(0, np.pi, 30)
+            x_s = np.outer(np.cos(u), np.sin(v)).flatten()
+            y_s = np.outer(np.sin(u), np.sin(v)).flatten()
+            z_s = np.outer(np.ones(30), np.cos(v)).flatten()
+            fig.add_trace(go.Scatter3d(
+                x=x_s, y=y_s, z=z_s, mode='markers',
+                marker=dict(size=1, color='gray', opacity=0.1), showlegend=False
+            ), row=1, col=col)
 
-    # Création des deux sous-graphiques 3D
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize,
-                                   subplot_kw={'projection': '3d'})
+        if col == 2:
+            fig.add_trace(go.Scatter3d(
+                x=embeddings[:, 0], y=embeddings[:, 1], z=embeddings[:, 2],
+                mode='lines', line=dict(color='blue', width=2), showlegend=False
+            ), row=1, col=2)
 
-    # Configuration commune des axes
-    for ax in (ax1, ax2):
-        ax.set_xlabel('Dimension 1')
-        ax.set_ylabel('Dimension 2')
-        ax.set_zlabel('Dimension 3')
-        ax.grid(True, alpha=0.3)
-        ax.set_xlim(-1.1, 1.1)
-        ax.set_ylim(-1.1, 1.1)
-        ax.set_zlim(-1.1, 1.1)
-        ax.set_box_aspect([1, 1, 1])  # Égaliser l'échelle
-        ax.view_init(elev=view_angle[0], azim=view_angle[1])
+        fig.add_trace(go.Scatter3d(
+            x=embeddings[:, 0], y=embeddings[:, 1], z=embeddings[:, 2],
+            mode='markers',
+            marker=dict(color=colors, colorscale='Viridis', size=3,
+                        showscale=(col == 2), colorbar=dict(title='x value')),
+            showlegend=False
+        ), row=1, col=col)
 
-    # Ajout de la sphère unité (optionnel)
-    if show_sphere:
-        u = np.linspace(0, 2 * np.pi, 30)
-        v = np.linspace(0, np.pi, 30)
-        x_sphere = np.outer(np.cos(u), np.sin(v))
-        y_sphere = np.outer(np.sin(u), np.sin(v))
-        z_sphere = np.outer(np.ones(np.size(u)), np.cos(v))
-        for ax in (ax1, ax2):
-            ax.plot_wireframe(x_sphere, y_sphere, z_sphere,
-                              color='gray', alpha=0.1, linewidth=0.5)
-
-    # Graphique 1 : scatter simple (ombrage de profondeur automatique)
-    sc = ax1.scatter(embeddings[:, 0], embeddings[:, 1], embeddings[:, 2],
-                     c=colors, cmap='viridis', s=50, alpha=0.8,
-                     edgecolors='black', linewidth=0.5, depthshade=True)
-    ax1.set_title('Scatter 3D')
-
-    # Graphique 2 : scatter avec trajectoire
-    ax2.plot(embeddings[:, 0], embeddings[:, 1], embeddings[:, 2],
-             color='blue', alpha=0.3, linewidth=1.5)
-    ax2.scatter(embeddings[:, 0], embeddings[:, 1], embeddings[:, 2],
-                c=colors, cmap='viridis', s=50, alpha=0.8,
-                edgecolors='black', linewidth=0.5, depthshade=True)
-    ax2.set_title('Trajectoire 3D')
-
-    # Ajustement pour laisser de la place à la colorbar à droite
-    plt.tight_layout()
-    fig.subplots_adjust(right=0.85)
-
-    # Ajout de la colorbar dans un axe dédié
-    cbar_ax = fig.add_axes([0.88, 0.15, 0.02, 0.7])  # [left, bottom, width, height]
-    cbar = fig.colorbar(sc, cax=cbar_ax)
-    cbar.set_label('Valeur de x', fontsize=12)
-
-    plt.show()
-
-    # Statistiques
-    print("Statistiques des embeddings (normalisés) :")
-    for i in range(3):
-        print(f"  Dimension {i+1} : min = {embeddings[:, i].min():.4f}, "
-              f"max = {embeddings[:, i].max():.4f}")
-
+    fig.write_html("embeddings_3d.html")
+    print("Saved embeddings_3d.html")
     return embeddings
+
+
+def plot_unembeddings_3d(model, num_points=1000, show_sphere=True):
+    model.eval()
+
+    with torch.no_grad():
+        unembeddings = model.unembedding.weight.cpu().numpy()[:num_points]
+    if unembeddings.shape[1] > 3:
+        unembeddings = unembeddings[:, :3]
+    unembeddings = unembeddings / np.linalg.norm(unembeddings, axis=1, keepdims=True)
+    colors = np.arange(num_points)
+
+    fig = make_subplots(rows=1, cols=2, specs=[[{'type': 'scatter3d'}, {'type': 'scatter3d'}]],
+                        subplot_titles=('Scatter 3D', 'Trajectory 3D'))
+
+    for col in [1, 2]:
+        if show_sphere:
+            u = np.linspace(0, 2 * np.pi, 30)
+            v = np.linspace(0, np.pi, 30)
+            x_s = np.outer(np.cos(u), np.sin(v)).flatten()
+            y_s = np.outer(np.sin(u), np.sin(v)).flatten()
+            z_s = np.outer(np.ones(30), np.cos(v)).flatten()
+            fig.add_trace(go.Scatter3d(
+                x=x_s, y=y_s, z=z_s, mode='markers',
+                marker=dict(size=1, color='gray', opacity=0.1), showlegend=False
+            ), row=1, col=col)
+
+        if col == 2:
+            fig.add_trace(go.Scatter3d(
+                x=unembeddings[:, 0], y=unembeddings[:, 1], z=unembeddings[:, 2],
+                mode='lines', line=dict(color='blue', width=2), showlegend=False
+            ), row=1, col=2)
+
+        fig.add_trace(go.Scatter3d(
+            x=unembeddings[:, 0], y=unembeddings[:, 1], z=unembeddings[:, 2],
+            mode='markers',
+            marker=dict(color=colors, colorscale='Viridis', size=3,
+                        showscale=(col == 2), colorbar=dict(title='y value')),
+            showlegend=False
+        ), row=1, col=col)
+
+    fig.write_html("unembeddings_3d.html")
+    print("Saved unembeddings_3d.html")
+    return unembeddings
 
 for epoch in range(epochs):
     x, y = sample_batch(batch_size)
@@ -207,5 +168,6 @@ torch.set_printoptions(
     profile='full'         
 )
 
-plot_embeddings_2d(model)
 plot_embeddings_3d(model)
+plot_unembeddings_3d(model)
+
