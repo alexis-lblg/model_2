@@ -1,0 +1,230 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+ 
+d = 3
+sigma = 0.008
+lr = 1
+epochs = 80000
+batch_size = 1001
+num_x = 1001
+device = "cuda"
+
+class TinyModel(nn.Module):
+    def __init__(self, d, num_classes):
+        super().__init__()
+        self.embedding = nn.Embedding(1001, d)
+        self.unembedding = nn.Linear(d, num_classes, bias=False)
+
+    def forward(self, x):
+        h = self.embedding(x)
+        logits = self.unembedding(h)
+        return logits
+
+model = TinyModel(d, num_x)
+model = model.to(device)
+
+optimizer = optim.AdamW(model.parameters())
+# CHANGED: CrossEntropyLoss -> MSELoss
+criterion = nn.MSELoss()
+
+def quantize_y(a):
+    i = a * (num_x - 1)
+    i = round(i)
+    return max(0, min(num_x - 1, i))
+
+def unquatize_y(a):
+    i = a / (num_x - 1)
+
+def compute_soft_targets(x_batch, sigma, num_x):
+    targets = np.zeros((len(x_batch), num_x))
+    y_values = np.arange(num_x) / (num_x - 1)
+    for i, x in enumerate(x_batch):
+        mean = (np.cos(2 * np.pi * x / 1000) + 1) / 2
+        probs = np.exp(-0.5 * ((y_values - mean) / sigma) ** 2)
+        probs /= probs.sum()
+        targets[i] = probs
+    return torch.tensor(targets, dtype=torch.float32).to(device)
+
+def sample_batch(batch_size):
+    repeats = batch_size // num_x
+    x = np.tile(np.arange(num_x), repeats)
+    np.random.shuffle(x)
+    return torch.tensor(x, dtype=torch.long).to(device), x
+
+def plot_embeddings_2d(model, num_points=1000):
+    model.eval()
+    x_values = torch.arange(0, num_points, dtype=torch.long).to(device)
+
+    with torch.no_grad():
+        embeddings = model.embedding(x_values).cpu().numpy()
+    embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+    colors = x_values.cpu().numpy()
+
+    fig = make_subplots(rows=1, cols=2, subplot_titles=('2D Embeddings', 'Embedding Trajectory'))
+
+    fig.add_trace(go.Scatter(
+        x=embeddings[:, 0], y=embeddings[:, 1],
+        mode='markers',
+        marker=dict(color=colors, colorscale='Viridis', size=5, showscale=True,
+                    colorbar=dict(title='x value', x=0.45)),
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=embeddings[:, 0], y=embeddings[:, 1],
+        mode='lines+markers',
+        marker=dict(color=colors, colorscale='Viridis', size=5, showscale=True,
+                    colorbar=dict(title='x value', x=1.0)),
+        line=dict(color='blue', width=1)
+    ), row=1, col=2)
+
+    fig.write_html("embeddings_2d.html")
+    print("Saved embeddings_2d.html")
+
+    print(f"Embedding statistics:")
+    print(f"  Range dim 1: [{embeddings[:, 0].min():.4f}, {embeddings[:, 0].max():.4f}]")
+    print(f"  Range dim 2: [{embeddings[:, 1].min():.4f}, {embeddings[:, 1].max():.4f}]")
+
+    return embeddings
+
+def plot_embeddings_3d(model, num_points=1000, show_sphere=True):
+    model.eval()
+    x_values = torch.arange(0, num_points, dtype=torch.long).to(device)
+
+    with torch.no_grad():
+        embeddings = model.embedding(x_values).cpu().numpy()
+
+    if embeddings.shape[1] > 3:
+        embeddings = embeddings[:, :3]
+
+    embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+    colors = x_values.cpu().numpy()
+
+    idx = np.random.permutation(num_points)
+    embeddings = embeddings[idx]
+    colors = colors[idx]
+
+    fig = make_subplots(rows=1, cols=2, specs=[[{'type': 'scatter3d'}, {'type': 'scatter3d'}]],
+                        subplot_titles=('Scatter 3D', 'Trajectory 3D'))
+
+    for col in [1, 2]:
+        if show_sphere:
+            u = np.linspace(0, 2 * np.pi, 30)
+            v = np.linspace(0, np.pi, 30)
+            x_s = np.outer(np.cos(u), np.sin(v)).flatten()
+            y_s = np.outer(np.sin(u), np.sin(v)).flatten()
+            z_s = np.outer(np.ones(30), np.cos(v)).flatten()
+            fig.add_trace(go.Scatter3d(
+                x=x_s, y=y_s, z=z_s, mode='markers',
+                marker=dict(size=1, color='gray', opacity=0.1), showlegend=False
+            ), row=1, col=col)
+
+        if col == 2:
+            sorted_idx = np.argsort(colors)
+            emb_sorted = embeddings[sorted_idx]
+            fig.add_trace(go.Scatter3d(
+                x=emb_sorted[:, 0], y=emb_sorted[:, 1], z=emb_sorted[:, 2],
+                mode='lines', line=dict(color='blue', width=2), showlegend=False
+            ), row=1, col=2)
+
+        fig.add_trace(go.Scatter3d(
+            x=embeddings[:, 0], y=embeddings[:, 1], z=embeddings[:, 2],
+            mode='markers',
+            marker=dict(color=colors, colorscale='Turbo', size=3,
+                        showscale=(col == 2), colorbar=dict(title='x value')),
+            showlegend=False
+        ), row=1, col=col)
+
+    fig.write_html("embeddings_3d.html")
+    print("Saved embeddings_3d.html")
+
+    print("Embedding statistics (normalized):")
+    for i in range(min(3, embeddings.shape[1])):
+        print(f"  Dimension {i+1}: min = {embeddings[:, i].min():.4f}, "
+              f"max = {embeddings[:, i].max():.4f}")
+
+    return embeddings
+
+def plot_unembeddings_3d(model, num_points=1000, show_sphere=True):
+    model.eval()
+
+    with torch.no_grad():
+        embeddings = model.unembedding.weight[:num_points].cpu().numpy()
+
+    if embeddings.shape[1] > 3:
+        embeddings = embeddings[:, :3]
+
+    embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+    colors = np.arange(num_points)
+
+    fig = make_subplots(rows=1, cols=2, specs=[[{'type': 'scatter3d'}, {'type': 'scatter3d'}]],
+                        subplot_titles=('Unembedding Scatter 3D', 'Unembedding Trajectory 3D'))
+
+    for col in [1, 2]:
+        if show_sphere:
+            u = np.linspace(0, 2 * np.pi, 30)
+            v = np.linspace(0, np.pi, 30)
+            x_s = np.outer(np.cos(u), np.sin(v)).flatten()
+            y_s = np.outer(np.sin(u), np.sin(v)).flatten()
+            z_s = np.outer(np.ones(30), np.cos(v)).flatten()
+            fig.add_trace(go.Scatter3d(
+                x=x_s, y=y_s, z=z_s, mode='markers',
+                marker=dict(size=1, color='gray', opacity=0.1), showlegend=False
+            ), row=1, col=col)
+
+        if col == 2:
+            fig.add_trace(go.Scatter3d(
+                x=embeddings[:, 0], y=embeddings[:, 1], z=embeddings[:, 2],
+                mode='lines', line=dict(color='blue', width=2), showlegend=False
+            ), row=1, col=2)
+
+        fig.add_trace(go.Scatter3d(
+            x=embeddings[:, 0], y=embeddings[:, 1], z=embeddings[:, 2],
+            mode='markers',
+            marker=dict(color=colors, colorscale='Viridis', size=3,
+                        showscale=(col == 2), colorbar=dict(title='x value')),
+            showlegend=False
+        ), row=1, col=col)
+
+    fig.write_html("unembedding_3d.html")
+    print("Saved unembedding_3d.html")
+
+    print("Unembedding statistics (normalized):")
+    for i in range(min(3, embeddings.shape[1])):
+        print(f"  Dimension {i+1}: min = {embeddings[:, i].min():.4f}, "
+              f"max = {embeddings[:, i].max():.4f}")
+
+    return embeddings
+
+for epoch in range(epochs):
+    x_tensor, x_numpy = sample_batch(batch_size)
+
+    soft_targets = compute_soft_targets(x_numpy, sigma, num_x)
+
+    optimizer.zero_grad()
+    logits = model(x_tensor)
+    # CHANGED: softmax output vs soft targets, instead of log_softmax cross-entropy
+    probs = torch.softmax(logits, dim=-1)
+    loss = criterion(probs, soft_targets)
+    loss.backward()
+    optimizer.step()
+
+    if epoch % 200 == 0:
+        print(f"Epoch {epoch:4d} | Loss: {loss.item():.5e}")
+
+print("Training complete.")
+
+model.eval()
+torch.set_printoptions(
+    precision=4,
+    threshold=float('inf'),
+    edgeitems=3,
+    linewidth=120,
+    profile='full'
+)
+
+plot_unembeddings_3d(model)
+plot_embeddings_3d(model)
